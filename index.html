@@ -1,10 +1,1066 @@
-html<!DOCTYPE html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-    <title>My GitHub Pages Site</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>⚽ WC2026 Predictor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { background:#0f172a; font-family:system-ui,-apple-system,sans-serif; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .spin { animation:spin 1s linear infinite; display:inline-block; }
+  </style>
 </head>
 <body>
-    <h1>Hello World!</h1>
-    <p>My GitHub Pages site is working.</p>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+/* ════════════════════════════════════════
+   CONFIG — GitHub repo details (safe to expose, NOT the token)
+   ════════════════════════════════════════ */
+const REPO_OWNER = 'specialkindofbiz-bot';
+const REPO_NAME  = 'World-Cup-2026';
+const BRANCH     = 'main';
+const DATA_FILE  = 'data/app-data.json';
+
+// Token is NEVER in source — admin enters it once in Admin > Setup
+// It is then stored in their browser only (localStorage)
+const getToken  = ()  => localStorage.getItem('wc26_gh_token') || '';
+const saveToken = (t) => localStorage.setItem('wc26_gh_token', t);
+
+const RAW_URL = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}/${DATA_FILE}`;
+const API_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${DATA_FILE}`;
+
+/* ════════════════════════════════════════
+   GAME DATA
+   ════════════════════════════════════════ */
+const GROUPS = [
+  {id:'A',teams:['Mexico','South Korea','South Africa','Czechia']},
+  {id:'B',teams:['Canada','Switzerland','Qatar','Bosnia-Herzegovina']},
+  {id:'C',teams:['Brazil','Morocco','Scotland','Haiti']},
+  {id:'D',teams:['USA','Australia','Paraguay','Türkiye']},
+  {id:'E',teams:['Germany','Ecuador','Ivory Coast','Curaçao']},
+  {id:'F',teams:['Netherlands','Japan','Tunisia','Sweden']},
+  {id:'G',teams:['Belgium','Iran','Egypt','New Zealand']},
+  {id:'H',teams:['Spain','Uruguay','Saudi Arabia','Cape Verde']},
+  {id:'I',teams:['France','Senegal','Norway','Iraq']},
+  {id:'J',teams:['Argentina','Austria','Algeria','Jordan']},
+  {id:'K',teams:['Portugal','Colombia','Uzbekistan','DR Congo']},
+  {id:'L',teams:['England','Croatia','Panama','Ghana']},
+];
+
+const FL = {
+  Mexico:'🇲🇽','South Korea':'🇰🇷','South Africa':'🇿🇦',Czechia:'🇨🇿',
+  Canada:'🇨🇦',Switzerland:'🇨🇭',Qatar:'🇶🇦','Bosnia-Herzegovina':'🇧🇦',
+  Brazil:'🇧🇷',Morocco:'🇲🇦',Scotland:'🏴󠁧󠁢󠁳󠁣󠁴󠁿',Haiti:'🇭🇹',
+  USA:'🇺🇸',Australia:'🇦🇺',Paraguay:'🇵🇾','Türkiye':'🇹🇷',
+  Germany:'🇩🇪',Ecuador:'🇪🇨','Ivory Coast':'🇨🇮','Curaçao':'🇨🇼',
+  Netherlands:'🇳🇱',Japan:'🇯🇵',Tunisia:'🇹🇳',Sweden:'🇸🇪',
+  Belgium:'🇧🇪',Iran:'🇮🇷',Egypt:'🇪🇬','New Zealand':'🇳🇿',
+  Spain:'🇪🇸',Uruguay:'🇺🇾','Saudi Arabia':'🇸🇦','Cape Verde':'🇨🇻',
+  France:'🇫🇷',Senegal:'🇸🇳',Norway:'🇳🇴',Iraq:'🇮🇶',
+  Argentina:'🇦🇷',Austria:'🇦🇹',Algeria:'🇩🇿',Jordan:'🇯🇴',
+  Portugal:'🇵🇹',Colombia:'🇨🇴',Uzbekistan:'🇺🇿','DR Congo':'🇨🇩',
+  England:'🏴󠁧󠁢󠁥󠁮󠁧󠁿',Croatia:'🇭🇷',Panama:'🇵🇦',Ghana:'🇬🇭',TBD:'❓',
+};
+const ALL_TEAMS = GROUPS.flatMap(g=>g.teams);
+const LOCK_DATE = new Date('2026-06-04T00:00:00');
+
+const RC = {
+  r32:  {name:'Round of 32',    pts:3, hasScore:false},
+  r16:  {name:'Round of 16',    pts:4, hasScore:false},
+  qf:   {name:'Quarter-Finals', pts:5, hasScore:true, ep:3},
+  sf:   {name:'Semi-Finals',    pts:6, hasScore:true, ep:3},
+  final:{name:'The Final',      pts:10,hasScore:true, ep:5},
+};
+const RNDS = ['r32','r16','qf','sf','final'];
+
+const DEF = {
+  settings:{adminPw:'wc2026admin',approvedUsernames:[],openRounds:[],
+    results:{groups:{},r32:[],r16:[],qf:[],sf:[],final:[],champion:''}},
+  participants:[],
+};
+
+/* ════════════════════════════════════════
+   GITHUB API HELPERS
+   ════════════════════════════════════════ */
+function utf8b64(s){ return btoa(unescape(encodeURIComponent(s))); }
+
+async function loadData(){
+  try{
+    const r=await fetch(RAW_URL+'?t='+Date.now());
+    if(r.status===404) return JSON.parse(JSON.stringify(DEF));
+    if(!r.ok) throw new Error('fetch fail');
+    return await r.json();
+  }catch{ return JSON.parse(JSON.stringify(DEF)); }
+}
+
+async function ghWrite(newData, msg='WC2026 update', retries=5){
+  const token = getToken();
+  if(!token) throw new Error('NO_TOKEN');
+  const headers = {'Authorization':`token ${token}`,'Accept':'application/vnd.github.v3+json','Content-Type':'application/json'};
+  for(let i=0;i<retries;i++){
+    const fr = await fetch(API_URL+`?ref=${BRANCH}`,{headers});
+    if(!fr.ok && fr.status!==404) throw new Error('fetch_err_'+fr.status);
+    let sha=null, base=JSON.parse(JSON.stringify(DEF));
+    if(fr.ok){
+      const fi=await fr.json(); sha=fi.sha;
+      base=JSON.parse(atob(fi.content.replace(/\n/g,'')));
+    }
+    // Merge participants by id (prevents overwriting others' picks)
+    const merged = mergeData(base, newData);
+    const body={message:msg,content:utf8b64(JSON.stringify(merged,null,2)),branch:BRANCH};
+    if(sha) body.sha=sha;
+    const pr=await fetch(API_URL,{method:'PUT',headers,body:JSON.stringify(body)});
+    if(pr.status===409||pr.status===422){ await sleep(600*(i+1)); continue; }
+    if(!pr.ok) throw new Error('write_err_'+pr.status);
+    return merged;
+  }
+  throw new Error('max_retries');
+}
+
+function mergeData(base, patch){
+  const settings = patch.settings || base.settings;
+  const baseParts = base.participants||[];
+  const patchParts = patch.participants||[];
+  const merged = [...baseParts];
+  patchParts.forEach(pp=>{
+    const idx=merged.findIndex(x=>x.id===pp.id);
+    if(idx>=0) merged[idx]=pp; else merged.push(pp);
+  });
+  return {settings, participants:merged};
+}
+
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+
+async function sha256(s){
+  const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s+'_wc2026_salt'));
+  return Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+
+/* ════════════════════════════════════════
+   SCORING
+   ════════════════════════════════════════ */
+function calcScore(p,settings){
+  if(!settings) return{total:0,d:{}};
+  const res=settings.results||{};
+  let total=0,d={g:0,ch:0,r32:0,r16:0,qf:0,sf:0,final:0,ex:0,kow:0};
+  if(res.groups){
+    GROUPS.forEach(g=>{
+      const act=res.groups[g.id],pick=p.groupPicks?.[g.id];
+      if(!act?.first||!pick?.length) return;
+      const t2=[act.first,act.second]; let gp=0;
+      if(t2.includes(pick[0])){gp+=2;if(pick[0]===act.first)gp+=1;}
+      if(pick[1]&&t2.includes(pick[1])){gp+=2;if(pick[1]===act.second)gp+=1;}
+      total+=gp; d.g+=gp;
+    });
+  }
+  if(res.champion&&p.championPick===res.champion){total+=5;d.ch=5;}
+  RNDS.forEach(rn=>{
+    const ms=res[rn]||[],pks=p.knockoutPicks?.[rn]||{},cfg=RC[rn]; let rp=0;
+    ms.forEach(m=>{
+      if(!m.result?.winner) return;
+      const pk=pks[m.id]; if(!pk) return;
+      if(!cfg.hasScore){if(pk===m.result.winner){rp+=cfg.pts;d.kow++;}}
+      else if(pk?.winner===m.result.winner){
+        rp+=cfg.pts;d.kow++;
+        if(Number(pk.h)===m.result.h&&Number(pk.a)===m.result.a){rp+=cfg.ep;d.ex++;}
+      }
+    });
+    total+=rp; d[rn]=rp;
+  });
+  return{total,d};
+}
+
+/* ════════════════════════════════════════
+   ROOT APP
+   ════════════════════════════════════════ */
+export default function App(){
+  const [appData,setAppData]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [loadErr,setLoadErr]=useState('');
+  const [user,setUser]=useState(()=>{try{return JSON.parse(sessionStorage.getItem('wc26_user'));}catch{return null;}});
+  const [tab,setTab]=useState('lb');
+
+  const refresh=useCallback(async()=>{
+    setLoading(true); setLoadErr('');
+    try{ setAppData(await loadData()); }
+    catch(e){ setLoadErr('Could not load data. Check connection.'); }
+    setLoading(false);
+  },[]);
+
+  useEffect(()=>{ refresh(); },[]);
+
+  const setUserAndStore=(u)=>{ setUser(u); if(u) sessionStorage.setItem('wc26_user',JSON.stringify(u)); else sessionStorage.removeItem('wc26_user'); };
+  const onData=(d)=>setAppData(d);
+
+  if(loading) return(
+    <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center gap-4">
+      <div className="text-6xl spin">⚽</div>
+      <p className="text-slate-400 text-sm">Loading WC2026 Predictor…</p>
+    </div>
+  );
+  if(loadErr) return(
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+      <div className="text-center"><p className="text-red-400 mb-4">{loadErr}</p>
+        <button onClick={refresh} className="bg-green-700 text-white px-5 py-2 rounded-xl font-bold">Retry</button></div>
+    </div>
+  );
+
+  const settings=appData?.settings||DEF.settings;
+  const participants=appData?.participants||[];
+  const locked=new Date()>=LOCK_DATE;
+
+  const TABS=[
+    {id:'lb',icon:'🏅',label:'Standings'},
+    {id:'picks',icon:'✏️',label:'My Picks'},
+    {id:'rules',icon:'📋',label:'Rules'},
+    {id:'admin',icon:'⚙️',label:'Admin'},
+  ];
+
+  return(
+    <div className="min-h-screen bg-slate-900 text-white">
+      {/* HEADER */}
+      <div className="bg-gradient-to-r from-green-900 via-green-800 to-emerald-900 px-4 py-3 text-center shadow-xl">
+        <h1 className="font-black text-xl tracking-widest">🏆 WC2026 PREDICTOR</h1>
+        <p className="text-green-200 text-xs mt-0.5">🇺🇸 USA · 🇨🇦 Canada · 🇲🇽 Mexico · Jun 11 – Jul 19, 2026</p>
+        <div className="flex items-center justify-center gap-3 mt-1 flex-wrap">
+          <span className={`text-xs font-bold ${locked?'text-red-300':'text-yellow-300'}`}>
+            {locked?'🔒 Group picks locked':'🔓 Picks lock Jun 4, 2026'}
+          </span>
+          {user&&<><span className="text-xs text-green-300 bg-green-900/60 px-2 py-0.5 rounded-full">👤 {user.username}</span>
+            <button onClick={()=>setUserAndStore(null)} className="text-xs text-slate-400 hover:text-white underline">sign out</button></>}
+        </div>
+      </div>
+      {/* NAV */}
+      <div className="flex bg-slate-800 border-b border-slate-700 sticky top-0 z-30">
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)}
+            className={`flex-1 py-2.5 flex flex-col items-center gap-0.5 text-xs sm:text-sm font-semibold transition-all ${tab===t.id?'bg-green-800 text-white border-b-2 border-green-400':'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+            <span className="text-base">{t.icon}</span><span className="hidden sm:block leading-none">{t.label}</span>
+          </button>
+        ))}
+      </div>
+      {/* CONTENT */}
+      <div className="max-w-2xl mx-auto p-3 pb-10">
+        {tab==='lb'    && <Leaderboard participants={participants} settings={settings} onRefresh={refresh}/>}
+        {tab==='picks' && (user
+          ? <PicksFlow user={user} participants={participants} settings={settings} locked={locked} onData={onData}/>
+          : <LoginScreen settings={settings} participants={participants} onLogin={setUserAndStore} onData={onData}/>
+        )}
+        {tab==='rules' && <Rules/>}
+        {tab==='admin' && <Admin appData={appData} onData={onData} onRefresh={refresh}/>}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════
+   LOGIN
+   ════════════════════════════════════════ */
+function LoginScreen({settings,participants,onLogin,onData}){
+  const [un,setUn]=useState('');
+  const [pw,setPw]=useState('');
+  const [pw2,setPw2]=useState('');
+  const [err,setErr]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [mode,setMode]=useState('login'); // login | register
+  const approved=(settings.approvedUsernames||[]).map(x=>x.toLowerCase());
+
+  const goLogin=async()=>{
+    const u=un.toLowerCase().trim();
+    if(!u||!pw){setErr('Enter username and password.');return;}
+    if(!approved.includes(u)){setErr('Username not recognised. Contact the organiser.');return;}
+    const ex=participants.find(p=>p.username===u);
+    if(!ex||!ex.passwordHash){setMode('register');return;}
+    setBusy(true);
+    const h=await sha256(pw);
+    if(h!==ex.passwordHash){setErr('Wrong password. Try again.');setBusy(false);return;}
+    onLogin({username:u,id:ex.id});
+    setBusy(false);
+  };
+
+  const goRegister=async()=>{
+    const u=un.toLowerCase().trim();
+    if(!approved.includes(u)){setErr('Username not approved.');return;}
+    if(pw.length<6){setErr('Password must be at least 6 characters.');return;}
+    if(pw!==pw2){setErr('Passwords do not match.');return;}
+    setBusy(true);
+    try{
+      const h=await sha256(pw);
+      const np={id:u+'_'+Date.now(),username:u,passwordHash:h,groupPicks:{},championPick:'',
+        knockoutPicks:{},disclaimer:null,paymentConfirmed:false,createdAt:Date.now(),updatedAt:Date.now()};
+      const nd=await ghWrite({...JSON.parse(JSON.stringify(DEF)),participants:[np]},'Register: '+u);
+      onData(nd); onLogin({username:u,id:np.id});
+    }catch(e){
+      if(e.message==='NO_TOKEN') setErr('App not configured yet. Ask the organiser to set up the admin token.');
+      else setErr('Registration failed. Please try again.');
+    }
+    setBusy(false);
+  };
+
+  if(mode==='register') return(
+    <div className="max-w-xs mx-auto pt-8">
+      <div className="text-center mb-6"><div className="text-4xl mb-2">🔑</div>
+        <h2 className="text-xl font-black">Create Your Password</h2>
+        <p className="text-slate-400 text-sm mt-1">Welcome <strong className="text-white">{un}</strong>! First time? Set a password.</p>
+      </div>
+      <div className="space-y-3">
+        <input type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="Choose password (min 6 chars)"
+          className="w-full bg-slate-800 border border-slate-600 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-green-500"/>
+        <input type="password" value={pw2} onChange={e=>setPw2(e.target.value)} placeholder="Confirm password"
+          onKeyDown={e=>e.key==='Enter'&&goRegister()}
+          className="w-full bg-slate-800 border border-slate-600 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-green-500"/>
+        {err&&<p className="text-red-400 text-xs">{err}</p>}
+        <button onClick={goRegister} disabled={busy}
+          className="w-full bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white py-3 rounded-xl font-black">
+          {busy?'Creating…':'Create Account & Continue →'}</button>
+        <button onClick={()=>{setMode('login');setErr('');}} className="w-full text-slate-400 hover:text-white text-sm py-1">← Back</button>
+      </div>
+    </div>
+  );
+
+  return(
+    <div className="max-w-xs mx-auto pt-8">
+      <div className="text-center mb-6"><div className="text-5xl mb-2">⚽</div>
+        <h2 className="text-2xl font-black">Sign In</h2>
+        <p className="text-slate-400 text-sm mt-1">Use the username given by the organiser</p>
+      </div>
+      <div className="space-y-3">
+        <input type="text" value={un} onChange={e=>setUn(e.target.value)} placeholder="Username"
+          className="w-full bg-slate-800 border border-slate-600 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-green-500"/>
+        <input type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="Password"
+          onKeyDown={e=>e.key==='Enter'&&goLogin()}
+          className="w-full bg-slate-800 border border-slate-600 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-green-500"/>
+        {err&&<p className="text-red-400 text-xs">{err}</p>}
+        <button onClick={goLogin} disabled={busy}
+          className="w-full bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white py-3 rounded-xl font-black">
+          {busy?'Signing in…':'Sign In →'}</button>
+      </div>
+      <p className="text-xs text-slate-600 text-center mt-4">No username? Contact the organiser.</p>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════
+   PICKS FLOW
+   ════════════════════════════════════════ */
+function PicksFlow({user,participants,settings,locked,onData}){
+  const p=participants.find(x=>x.username===user.username)||{};
+  const [gPicks,setGPicks]=useState(()=>JSON.parse(JSON.stringify(p.groupPicks||{})));
+  const [champ,setChamp]=useState(p.championPick||'');
+  const [koPicks,setKoPicks]=useState(()=>JSON.parse(JSON.stringify(p.knockoutPicks||{})));
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState('');
+  const [showDisclaimer,setShowDisclaimer]=useState(false);
+  const signed=!!p.disclaimer?.signed;
+
+  const toggleGroup=(gid,team)=>{
+    if(locked) return;
+    setGPicks(prev=>{
+      const c=[...(prev[gid]||[])]; const i=c.indexOf(team);
+      if(i!==-1) c.splice(i,1); else if(c.length<2) c.push(team); else c[1]=team;
+      return{...prev,[gid]:c};
+    });
+  };
+  const setKo=(rnd,mid,val)=>setKoPicks(prev=>({...prev,[rnd]:{...(prev[rnd]||{}),[mid]:val}}));
+
+  const handleAttempt=()=>{
+    const done=GROUPS.every(g=>(gPicks[g.id]?.length||0)>=2);
+    if(!locked&&!done){setErr('⚠️ Pick top 2 for all 12 groups!');return;}
+    if(!locked&&!champ){setErr('⚠️ Pick your champion!');return;}
+    setErr('');
+    if(!signed){setShowDisclaimer(true);return;}
+    doSave(p.disclaimer);
+  };
+
+  const doSave=async(disclaimer)=>{
+    setBusy(true); setErr('');
+    try{
+      const entry={...p,
+        id:p.id||(user.username+'_'+Date.now()),username:user.username,
+        groupPicks:locked?(p.groupPicks||gPicks):gPicks,
+        championPick:locked?(p.championPick||champ):champ,
+        knockoutPicks:koPicks, disclaimer, updatedAt:Date.now(),
+      };
+      const nd=await ghWrite({participants:[entry]},'Picks: '+user.username);
+      onData(nd); setShowDisclaimer(false);
+      setErr(''); alert('✅ Picks saved successfully!');
+    }catch(e){
+      if(e.message==='NO_TOKEN') setErr('❌ App not configured. Ask organiser to set up the admin token in Admin > Setup.');
+      else setErr('❌ Save failed. Please try again.');
+    }
+    setBusy(false);
+  };
+
+  if(showDisclaimer) return <DisclaimerPage onSign={doSave} onBack={()=>setShowDisclaimer(false)} busy={busy}/>;
+
+  const doneCount=GROUPS.filter(g=>(gPicks[g.id]?.length||0)>=2).length;
+  const openRounds=settings.openRounds||[];
+
+  return(
+    <div>
+      {signed&&<div className="bg-green-900/30 border border-green-700/40 rounded-xl p-2 mb-3 text-xs text-green-300 text-center">
+        ✅ Disclaimer signed — {new Date(p.disclaimer.timestamp).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</div>}
+
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h2 className="font-black text-lg">Hi, {user.username}! 👋</h2>
+          <p className="text-xs text-slate-400">{locked?'🔒 Group picks locked':`${doneCount}/12 groups · locks Jun 4`}</p>
+        </div>
+        <div className={`text-sm font-black px-3 py-1 rounded-full ${doneCount===12?'bg-green-800 text-green-300':'bg-slate-700 text-slate-400'}`}>{doneCount}/12</div>
+      </div>
+      <div className="h-1.5 bg-slate-700 rounded-full mb-4">
+        <div className="h-1.5 bg-green-500 rounded-full transition-all" style={{width:`${(doneCount/12)*100}%`}}/>
+      </div>
+
+      {/* Champion */}
+      <div className="bg-slate-800 border border-yellow-800/60 rounded-xl p-3 mb-4">
+        <h3 className="font-bold text-yellow-400 text-sm mb-2">🏆 Champion Pick — <span className="text-yellow-600 font-normal">+5 bonus pts</span></h3>
+        {locked?<p>{champ?`${FL[champ]||''} ${champ}`:<span className="text-slate-500">Not set</span>}</p>:(
+          <select value={champ} onChange={e=>setChamp(e.target.value)}
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-yellow-500">
+            <option value="">— Pick your champion —</option>
+            {GROUPS.map(g=><optgroup key={g.id} label={`Group ${g.id}`}>{g.teams.map(t=><option key={t} value={t}>{FL[t]||''} {t}</option>)}</optgroup>)}
+          </select>
+        )}
+        {champ&&!locked&&<p className="text-yellow-300 text-xs mt-1.5">{FL[champ]} {champ} selected ✓</p>}
+      </div>
+
+      {/* Groups */}
+      <h3 className="font-black text-green-400 mb-1">Group Stage — Pick Top 2 From Each</h3>
+      <p className="text-xs text-slate-400 mb-3">{locked?'Your locked group picks.'
+        :'Tap 1st pick → 🥇 gold. Tap 2nd pick → 🥈 silver. Tap again to deselect.'}</p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+        {GROUPS.map(g=>{
+          const picks=gPicks[g.id]||[]; const [p1,p2]=picks;
+          const res=settings.results?.groups?.[g.id];
+          return(
+            <div key={g.id} className={`bg-slate-800 rounded-xl p-3 border ${picks.length>=2?'border-green-800/60':'border-slate-700'}`}>
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-black text-green-400 text-sm">Group {g.id}</span>
+                <div className="flex gap-1 text-xs flex-wrap justify-end">
+                  {p1?<span className="bg-yellow-800/70 text-yellow-200 px-1.5 py-0.5 rounded">{FL[p1]||''} {p1.length>9?p1.slice(0,9)+'…':p1}</span>:<span className="text-slate-600">1st?</span>}
+                  {p2?<span className="bg-slate-600/80 text-slate-200 px-1.5 py-0.5 rounded">{FL[p2]||''} {p2.length>9?p2.slice(0,9)+'…':p2}</span>:<span className="text-slate-600">2nd?</span>}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-1">
+                {g.teams.map(team=>{
+                  const idx=picks.indexOf(team); const is1=idx===0; const is2=idx===1;
+                  return(
+                    <button key={team} onClick={()=>toggleGroup(g.id,team)} disabled={locked}
+                      className={`flex items-center gap-1 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all active:scale-95 ${
+                        is1?'bg-yellow-700 text-white ring-2 ring-yellow-500':
+                        is2?'bg-slate-600 text-white ring-1 ring-slate-400':
+                        locked?'bg-slate-700/50 text-slate-500 cursor-not-allowed':
+                        'bg-slate-700 text-slate-200 hover:bg-slate-600 cursor-pointer'}`}>
+                      <span className="text-base leading-none">{FL[team]||'🏳️'}</span>
+                      <span className="truncate">{team}</span>
+                      {is1&&<span className="ml-auto text-xs">🥇</span>}
+                      {is2&&<span className="ml-auto text-xs">🥈</span>}
+                    </button>
+                  );
+                })}
+              </div>
+              {res?.first&&<p className="mt-1.5 text-xs text-slate-500">✅ {FL[res.first]} {res.first} · {FL[res.second]} {res.second}</p>}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Knockout picks */}
+      {openRounds.map(rnd=>{
+        const ms=settings.results?.[rnd]||[]; if(!ms.length) return null;
+        const cfg=RC[rnd]; const rp=koPicks[rnd]||{};
+        return(
+          <div key={rnd} className="mb-4">
+            <h3 className="font-black text-green-400 mb-1">{cfg.name}</h3>
+            <p className="text-xs text-slate-400 mb-2">{cfg.hasScore?`Winner ${cfg.pts}pts · Exact score +${cfg.ep}pts`:`Correct winner: ${cfg.pts}pts`}</p>
+            <div className="space-y-2">
+              {ms.map(m=>{
+                const pk=rp[m.id]; const home=m.home||'TBD',away=m.away||'TBD';
+                return(
+                  <div key={m.id} className="bg-slate-800 border border-slate-700 rounded-xl p-3">
+                    {m.result?.winner&&<p className="text-xs text-green-400 text-center mb-2">✅ {FL[m.result.winner]} {m.result.winner}{cfg.hasScore?` (${m.result.h}–${m.result.a})`:''}</p>}
+                    <div className="flex gap-2">
+                      {[home,away].map((team,ti)=>{
+                        const picked=cfg.hasScore?pk?.winner===team:pk===team;
+                        return(
+                          <button key={ti} onClick={()=>{
+                            if(cfg.hasScore){const prev=pk||{};setKo(rnd,m.id,{...prev,winner:team});}
+                            else setKo(rnd,m.id,team);
+                          }} className={`flex-1 py-2 rounded-lg text-xs font-bold text-center transition-all ${picked?'bg-green-700 text-white ring-2 ring-green-400':'bg-slate-700 text-slate-200 hover:bg-slate-600'}`}>
+                            {FL[team]||'❓'} {team}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {cfg.hasScore&&pk?.winner&&(
+                      <div className="mt-2 flex items-center justify-center gap-2 flex-wrap text-sm">
+                        <span>{FL[home]||'?'}</span>
+                        <input type="number" min="0" max="20" value={pk.h??''} onChange={e=>setKo(rnd,m.id,{...pk,h:+e.target.value})}
+                          className="w-10 text-center bg-slate-700 border border-slate-600 rounded-lg py-1 text-xs focus:outline-none"/>
+                        <span className="text-slate-400 font-bold">–</span>
+                        <input type="number" min="0" max="20" value={pk.a??''} onChange={e=>setKo(rnd,m.id,{...pk,a:+e.target.value})}
+                          className="w-10 text-center bg-slate-700 border border-slate-600 rounded-lg py-1 text-xs focus:outline-none"/>
+                        <span>{FL[away]||'?'}</span>
+                        <span className="text-xs text-green-400">→ {FL[pk.winner]} wins</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+
+      {err&&<div className="bg-red-900/50 border border-red-700 text-red-300 rounded-xl p-3 text-sm mb-3">{err}</div>}
+      <button onClick={handleAttempt} disabled={busy}
+        className="w-full bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white py-3 rounded-xl font-black text-sm transition-all">
+        {busy?'⏳ Saving…':(signed?'💾 Save My Picks':'📋 Review Disclaimer & Submit →')}
+      </button>
+      <p className="text-xs text-center text-slate-600 mt-2">Group picks lock Jun 4, 2026 • Your picks are auto-merged, won't overwrite others</p>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════
+   DISCLAIMER
+   ════════════════════════════════════════ */
+function DisclaimerPage({onSign,onBack,busy}){
+  const [fullName,setFullName]=useState('');
+  const [checks,setChecks]=useState({c1:false,c2:false,c3:false,c4:false});
+  const [err,setErr]=useState('');
+  const allChecked=Object.values(checks).every(Boolean);
+
+  const handleSign=()=>{
+    if(!fullName.trim()){setErr('Please type your full legal name to sign.');return;}
+    if(!allChecked){setErr('Please tick all boxes to confirm your agreement.');return;}
+    onSign({signed:true,fullName:fullName.trim(),timestamp:Date.now(),checks});
+  };
+
+  const TERMS=`WORLD CUP 2026 PREDICTION CONTEST
+DISCLAIMER & TERMS OF PARTICIPATION
+
+1. VOLUNTARY PARTICIPATION
+I confirm that I am joining this prediction contest entirely of my own free will, for entertainment purposes only within a private group. I have not been coerced, pressured, or misled into participating.
+
+2. ORGANISER'S FINAL & BINDING AUTHORITY
+I understand and irrevocably agree that ALL decisions made by the organiser — including but not limited to scoring, results, dispute resolution, prize distribution, and all other contest matters — are FINAL and BINDING. I fully and unconditionally waive any right to challenge, contest, dispute, or appeal any such decision in any forum, court, or tribunal whatsoever.
+
+3. FULL AND UNCONDITIONAL INDEMNITY
+I hereby FULLY, UNCONDITIONALLY and IRREVOCABLY release, indemnify, and hold harmless the organiser and all associated persons, agents, and representatives from any and all claims, demands, actions, suits, proceedings, damages, losses, liabilities, costs, or expenses of any nature whatsoever — whether civil, criminal, regulatory, administrative, or otherwise — arising from, connected with, or in any way relating to this contest, its outcome, or my participation in it. This indemnity shall survive termination of the contest.
+
+4. PERSONAL LEGAL RESPONSIBILITY
+I personally and solely confirm that my participation is lawful under all laws and regulations applicable in my jurisdiction. I accept FULL personal responsibility for ensuring my own compliance with all applicable local laws. The organiser makes no representation and accepts no responsibility regarding the legality of participation in any jurisdiction.
+
+5. NO ORGANISER LIABILITY WHATSOEVER
+The organiser shall not be held responsible, accountable, or liable in any manner for: the contest outcome; technical failures; data loss; changes to format; or any other matter arising from this contest.
+
+6. PAYMENT CONDITION PRECEDENT
+I understand and confirm that my participation is ONLY valid and effective upon confirmed receipt of my full deposit payment by the organiser. Any picks submitted without confirmed payment may be disqualified at the organiser's sole discretion.
+
+7. DATA CONSENT
+I freely consent to my username and predictions being displayed on the shared leaderboard visible to all participants for the duration of this contest.
+
+8. ENTIRE AGREEMENT
+This disclaimer constitutes the entire agreement between myself and the organiser regarding this contest and supersedes all prior understandings.`;
+
+  return(
+    <div className="pb-6">
+      <h2 className="font-black text-xl text-center mb-1">📋 Disclaimer & Terms</h2>
+      <p className="text-slate-400 text-sm text-center mb-4">Read carefully and sign before submitting picks.</p>
+      <div className="bg-slate-800 border border-slate-600 rounded-xl p-4 mb-4 h-60 overflow-y-auto text-xs text-slate-300 leading-relaxed whitespace-pre-wrap font-mono">
+        {TERMS}
+      </div>
+      <div className="space-y-2 mb-4">
+        {[
+          ['c1','I have read and fully understood all the above terms.'],
+          ['c2','I voluntarily agree to be bound by all terms, including the organiser\'s final decision authority and my full unconditional indemnity.'],
+          ['c3','I confirm my participation is lawful in my jurisdiction and I accept full personal legal responsibility.'],
+          ['c4','I understand my entry is only valid upon confirmed payment of the deposit to the organiser.'],
+        ].map(([k,txt])=>(
+          <label key={k} className="flex gap-3 items-start cursor-pointer bg-slate-800 hover:bg-slate-700 rounded-xl p-3 border border-slate-700 select-none">
+            <input type="checkbox" checked={checks[k]||false} onChange={e=>setChecks(p=>({...p,[k]:e.target.checked}))}
+              className="mt-0.5 w-5 h-5 accent-green-500 shrink-0 cursor-pointer"/>
+            <span className="text-xs text-slate-300 leading-relaxed">{txt}</span>
+          </label>
+        ))}
+      </div>
+      <div className="bg-slate-800 border border-yellow-700/50 rounded-xl p-4 mb-4">
+        <label className="text-sm font-bold text-yellow-400 block mb-2">✍️ Digital Signature</label>
+        <p className="text-xs text-slate-400 mb-2">Type your full legal name below to digitally sign this agreement. By typing it, you confirm you have read and agree to all terms above.</p>
+        <input value={fullName} onChange={e=>setFullName(e.target.value)} placeholder="Your Full Legal Name"
+          className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-yellow-500 text-sm font-semibold italic"/>
+        {fullName&&<p className="text-xs text-slate-500 mt-1.5">Signed: <em className="text-white">{fullName}</em> · {new Date().toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})}</p>}
+      </div>
+      {err&&<div className="bg-red-900/50 border border-red-700 text-red-300 rounded-xl p-3 text-sm mb-3">{err}</div>}
+      <div className="flex gap-2">
+        <button onClick={onBack} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-3 rounded-xl font-bold text-sm">← Back</button>
+        <button onClick={handleSign} disabled={busy||!allChecked||!fullName.trim()}
+          className="flex-[2] bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white py-3 rounded-xl font-black text-sm">
+          {busy?'⏳ Submitting…':'✅ I Agree & Submit Picks'}</button>
+      </div>
+      <p className="text-xs text-slate-600 text-center mt-3">Your digital signature, username and timestamp are recorded with your submission.</p>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════
+   LEADERBOARD
+   ════════════════════════════════════════ */
+function Leaderboard({participants,settings,onRefresh}){
+  const [exp,setExp]=useState(null);
+  const [refreshing,setRefreshing]=useState(false);
+  const doRefresh=async()=>{setRefreshing(true);await onRefresh();setRefreshing(false);};
+
+  const ranked=[...participants]
+    .filter(p=>p.disclaimer?.signed)
+    .map(p=>({...p,sc:calcScore(p,settings)}))
+    .sort((a,b)=>b.sc.total-a.sc.total||(b.sc.d.ex||0)-(a.sc.d.ex||0)||(b.sc.d.kow||0)-(a.sc.d.kow||0)||(b.sc.d.g||0)-(a.sc.d.g||0));
+
+  const medal=i=>['🥇','🥈','🥉'][i]??`${i+1}.`;
+  const rowBg=i=>i===0?'bg-yellow-900/40 border-yellow-700/60':i===1?'bg-slate-700/30 border-slate-500/50':i===2?'bg-orange-900/30 border-orange-700/50':'bg-slate-800 border-slate-700/40';
+
+  return(
+    <div>
+      <div className="flex justify-between items-center mb-3">
+        <h2 className="font-black text-green-400 text-lg">Live Standings</h2>
+        <div className="flex gap-2 items-center">
+          <span className="text-xs text-slate-500 bg-slate-800 px-2 py-1 rounded-full border border-slate-700">{ranked.length} players</span>
+          <button onClick={doRefresh} disabled={refreshing} className="text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 px-2 py-1 rounded-lg">
+            {refreshing?<span className="spin">↻</span>:'🔄'}</button>
+        </div>
+      </div>
+      {!ranked.length?(
+        <div className="text-center py-12"><div className="text-5xl mb-3">🌍</div>
+          <p className="text-slate-400">No confirmed players yet.</p>
+          <p className="text-slate-500 text-sm mt-1">Participants appear here once they've signed the disclaimer and saved picks.</p></div>
+      ):(
+        <div className="space-y-1.5">
+          {ranked.map((p,i)=>(
+            <div key={p.id} className="overflow-hidden rounded-xl border">
+              <div onClick={()=>setExp(exp===p.id?null:p.id)}
+                className={`flex items-center gap-3 p-3 cursor-pointer transition-all hover:brightness-110 ${rowBg(i)}`}>
+                <span className="text-xl w-8 text-center shrink-0 font-bold">{medal(i)}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold truncate">{p.username}</div>
+                  <div className="text-xs text-slate-400 truncate">🏆 {p.championPick?`${FL[p.championPick]||''} ${p.championPick}`:'—'}
+                    {p.paymentConfirmed&&<span className="ml-2 text-blue-400">💳</span>}</div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="text-2xl font-black text-green-400">{p.sc.total}</div>
+                  <div className="text-xs text-slate-500">pts</div>
+                </div>
+                <span className="text-slate-600 text-xs">{exp===p.id?'▲':'▼'}</span>
+              </div>
+              {exp===p.id&&(
+                <div className="bg-slate-800/90 px-4 py-3 border-t border-slate-700/50">
+                  <div className="grid grid-cols-4 gap-1.5 text-xs text-center mb-2">
+                    {[['Groups',p.sc.d.g],['Champ ⭐',p.sc.d.ch],['R32',p.sc.d.r32],['R16',p.sc.d.r16],
+                      ['QF',p.sc.d.qf],['SF',p.sc.d.sf],['Final',p.sc.d.final],['🎯 Exact',p.sc.d.ex]].map(([l,v])=>(
+                      <div key={l} className="bg-slate-700/50 rounded-lg py-1.5">
+                        <div className="text-slate-400">{l}</div><div className="font-bold">{v||0}</div></div>
+                    ))}
+                  </div>
+                  <div className="text-xs text-slate-500 mb-1">Group picks:</div>
+                  <div className="flex flex-wrap gap-1">
+                    {GROUPS.map(g=>{
+                      const picks=p.groupPicks?.[g.id]||[]; const res=settings?.results?.groups?.[g.id];
+                      const cls=(t,pos)=>{if(!res)return 'text-slate-300';const t2=[res.first,res.second];
+                        if(!t2.includes(t))return 'text-red-400';
+                        return(pos===0&&t===res.first)||(pos===1&&t===res.second)?'text-green-400':'text-blue-400';};
+                      return(<span key={g.id} className="bg-slate-700/40 rounded px-1.5 py-0.5 text-xs">
+                        <span className="text-slate-500 font-bold">G{g.id}:</span>{' '}
+                        <span className={cls(picks[0],0)}>{FL[picks[0]]||'?'}</span>{' '}
+                        <span className={cls(picks[1],1)}>{FL[picks[1]]||'?'}</span>
+                      </span>);
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="text-xs text-slate-600 text-center mt-4">Tiebreakers: exact scores → KO winners → group pts</p>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════
+   RULES
+   ════════════════════════════════════════ */
+function Rules(){
+  const Card=({t,ch})=><div className="bg-slate-800 rounded-xl p-4 border border-slate-700"><h3 className="font-bold text-yellow-400 mb-2 text-sm">{t}</h3>{ch}</div>;
+  return(
+    <div className="space-y-3">
+      <h2 className="font-black text-xl text-green-400">📋 Rules & Scoring</h2>
+      <Card t="🔑 How to Join" ch={<p className="text-sm text-slate-300">The organiser gives you a <strong className="text-white">unique username</strong>. Visit the URL, go to My Picks, enter your username, and create your own private password. Your entry is only valid after you: ① sign the disclaimer and ② make your deposit payment to the organiser.</p>}/>
+      <Card t="🔒 Prediction Lock" ch={<div className="text-sm text-slate-300 space-y-1"><p>Group picks + champion pick lock <strong className="text-white">June 4, 2026</strong> — one week before the tournament.</p><p>Knockout predictions open progressively during the tournament as admin unlocks each round.</p></div>}/>
+      <Card t="📊 Scoring" ch={<div className="text-sm space-y-2">
+        <div><p className="font-semibold text-white mb-1">Group Stage (×12 groups)</p>
+          {[['Correct team in top 2 (any position)','2 pts each'],['Bonus: exact 1st place','1 pt'],['Bonus: exact 2nd place','1 pt'],['Max: 6 pts/group · Total max: 72 pts','']].map(([a,b])=><div key={a} className="flex justify-between text-xs py-0.5"><span className="text-slate-300">{a}</span>{b&&<span className="font-bold text-green-400">{b}</span>}</div>)}</div>
+        <div><p className="font-semibold text-white mb-1">Knockout Rounds</p>
+          {[['Round of 32 winner','3 pts'],['Round of 16 winner','4 pts'],['QF winner / exact score ⭐','5 + 3 pts'],['SF winner / exact score ⭐','6 + 3 pts'],['Final winner / exact score ⭐','10 + 5 pts'],['Champion pre-pick','5 pts']].map(([a,b])=><div key={a} className="flex justify-between text-xs py-0.5"><span className="text-slate-300">{a}</span><span className="font-bold text-green-400">{b}</span></div>)}</div>
+        <p className="text-xs text-slate-500">⭐ Exact score bonus only counts if winner pick is also correct.</p>
+      </div>}/>
+      <Card t="⚖️ Tiebreakers" ch={<div className="text-sm text-slate-300 space-y-0.5">{['1. Most exact score predictions (QF/SF/Final)','2. Most correct knockout winners','3. Highest group stage points','4. Shared position if still tied'].map(t=><p key={t}>{t}</p>)}</div>}/>
+      <Card t="📝 Score Notes" ch={<p className="text-sm text-slate-400">Score predictions = result after full time + extra time. For penalty shootouts: enter the ET score (e.g. 1–1) and pick the penalty winner. Exact score applies to ET result.</p>}/>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════
+   ADMIN
+   ════════════════════════════════════════ */
+function Admin({appData,onData,onRefresh}){
+  const [pw,setPw]=useState('');
+  const [authed,setAuthed]=useState(false);
+  const [err,setErr]=useState('');
+  const [aTab,setATab]=useState('setup');
+  const [flash,setFlash]=useState({msg:'',ok:true});
+  const settings=appData?.settings||DEF.settings;
+  const participants=appData?.participants||[];
+
+  const login=()=>{
+    if(pw===(settings.adminPw||'wc2026admin')){setAuthed(true);setErr('');}
+    else setErr('Wrong password. Default: wc2026admin');
+  };
+
+  const showFlash=(msg,ok=true)=>{setFlash({msg,ok});setTimeout(()=>setFlash({msg:'',ok:true}),3000);};
+
+  const saveSt=async(newSt)=>{
+    try{const nd=await ghWrite({settings:newSt},'Admin: settings');onData(nd);showFlash('✅ Saved!');}
+    catch(e){
+      if(e.message==='NO_TOKEN') showFlash('❌ No token set. Go to Setup tab first.',false);
+      else showFlash('❌ Save failed: '+e.message,false);
+    }
+  };
+
+  if(!authed) return(
+    <div className="max-w-xs mx-auto pt-8">
+      <h2 className="text-xl font-black text-center mb-1">⚙️ Admin Panel</h2>
+      <p className="text-slate-400 text-sm text-center mb-6">Admin access required</p>
+      <input type="password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==='Enter'&&login()}
+        placeholder="Admin password"
+        className="w-full bg-slate-800 border border-slate-600 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-green-500 mb-2"/>
+      {err&&<p className="text-red-400 text-xs mb-2">{err}</p>}
+      <button onClick={login} className="w-full bg-green-700 hover:bg-green-600 text-white py-2.5 rounded-xl font-black text-sm">Login</button>
+      <p className="text-xs text-slate-600 text-center mt-2">Default: wc2026admin</p>
+    </div>
+  );
+
+  const aTabs=[{id:'setup',l:'⚙️ Setup'},{id:'users',l:'👥 Users'},{id:'groups',l:'🏟 Groups'},{id:'knockout',l:'🥊 Knockout'},{id:'players',l:'📋 Players'},{id:'config',l:'🔧 Config'}];
+
+  return(
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-black text-lg">⚙️ Admin</h2>
+        {flash.msg&&<span className={`text-xs font-bold px-2 py-1 rounded ${flash.ok?'text-green-400 bg-green-900/40':'text-red-400 bg-red-900/40'}`}>{flash.msg}</span>}
+      </div>
+      <div className="flex gap-1 bg-slate-800 p-1 rounded-xl mb-4 overflow-x-auto hide-scrollbar">
+        {aTabs.map(t=><button key={t.id} onClick={()=>setATab(t.id)}
+          className={`flex-shrink-0 py-1.5 px-2.5 rounded-lg text-xs font-bold transition-all ${aTab===t.id?'bg-green-700 text-white':'text-slate-400 hover:text-white'}`}>{t.l}</button>)}
+      </div>
+      {aTab==='setup'    && <AdminSetup showFlash={showFlash}/>}
+      {aTab==='users'    && <AdminUsers settings={settings} onSave={saveSt}/>}
+      {aTab==='groups'   && <AdminGroups settings={settings} onSave={saveSt}/>}
+      {aTab==='knockout' && <AdminKnockout settings={settings} onSave={saveSt}/>}
+      {aTab==='players'  && <AdminPlayers participants={participants} settings={settings} onData={onData} showFlash={showFlash}/>}
+      {aTab==='config'   && <AdminConfig settings={settings} onSave={saveSt} onRefresh={onRefresh}/>}
+    </div>
+  );
+}
+
+function AdminSetup({showFlash}){
+  const [token,setToken]=useState('');
+  const [saved,setSaved]=useState(!!getToken());
+  const doSave=()=>{
+    if(!token.trim()){showFlash('❌ Enter a valid token',false);return;}
+    saveToken(token.trim()); setSaved(true); setToken('');
+    showFlash('✅ Token saved to this browser!');
+  };
+  return(
+    <div className="space-y-4">
+      <div className="bg-amber-900/30 border border-amber-700/50 rounded-xl p-4 text-sm text-amber-200">
+        <p className="font-bold mb-2">⚙️ One-Time Setup (Admin Only)</p>
+        <p className="text-xs leading-relaxed">The app writes data to this GitHub repo. The token is stored <strong>only in your browser</strong> (not in any source file). You need to set it once on each device you administer from.</p>
+      </div>
+      <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+        <h3 className="font-bold text-sm mb-3">🔑 GitHub Token</h3>
+        <div className="text-xs text-slate-400 space-y-1 mb-3">
+          <p>1. Go to <strong className="text-white">github.com → Settings → Developer Settings → Personal access tokens → Fine-grained tokens</strong></p>
+          <p>2. Generate a new token: set <em className="text-white">Repository access</em> to <em className="text-white">World-Cup-2026</em> only</p>
+          <p>3. Permission: <em className="text-white">Contents: Read and write</em> only — nothing else</p>
+          <p>4. Copy the token and paste below</p>
+        </div>
+        <div className={`text-xs mb-3 px-2 py-1.5 rounded-lg ${saved?'bg-green-900/40 text-green-300':'bg-slate-700 text-slate-400'}`}>
+          {saved?'✅ Token is set on this browser — app is ready to write data.':'⚠️ No token set — app can read but not save data yet.'}</div>
+        <input type="password" value={token} onChange={e=>setToken(e.target.value)} placeholder="ghp_... (paste token here)"
+          className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-green-500 mb-2"/>
+        <button onClick={doSave} disabled={!token.trim()}
+          className="w-full bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white py-2 rounded-lg text-sm font-bold">Save Token to This Browser</button>
+        {saved&&<button onClick={()=>{saveToken('');setSaved(false);}} className="w-full mt-1 text-red-400 hover:text-red-300 text-xs py-1">Clear saved token</button>}
+      </div>
+      <div className="bg-slate-800 rounded-xl p-4 border border-slate-700 text-xs text-slate-400 space-y-1">
+        <p className="font-bold text-white">Why this approach?</p>
+        <p>The token is <em>never</em> stored in source code (avoids GitHub scanning & revocation). Each admin device saves their own token in the browser. Participants don't need a token — they write data via the same mechanism, using a shared write token set by admin.</p>
+        <p className="text-amber-400 mt-2">💡 After first setup, participants also need the write token set. Consider hosting this setup page securely or using the URL below to share with trusted co-admins only.</p>
+      </div>
+    </div>
+  );
+}
+
+function AdminUsers({settings,onSave}){
+  const [newUser,setNewUser]=useState('');
+  const approved=settings.approvedUsernames||[];
+  const add=()=>{
+    const u=newUser.toLowerCase().trim();
+    if(!u||approved.includes(u)){setNewUser('');return;}
+    if(approved.length>=100){alert('Max 100 participants.');return;}
+    onSave({...settings,approvedUsernames:[...approved,u]});
+    setNewUser('');
+  };
+  const remove=u=>window.confirm(`Remove "${u}"?`)&&onSave({...settings,approvedUsernames:approved.filter(x=>x!==u)});
+  const bulkAdd=txt=>{
+    const ns=txt.split(/[\n,;]+/).map(s=>s.trim().toLowerCase()).filter(Boolean);
+    const u=[...new Set([...approved,...ns])].slice(0,100);
+    onSave({...settings,approvedUsernames:u});
+  };
+  return(
+    <div>
+      <p className="text-xs text-slate-400 mb-3">Add approved usernames here. Only these usernames can register. Max 100.</p>
+      <div className="flex gap-1 mb-3">
+        <input value={newUser} onChange={e=>setNewUser(e.target.value)} onKeyDown={e=>e.key==='Enter'&&add()} placeholder="Add username (e.g. alice, player01)"
+          className="flex-1 bg-slate-800 border border-slate-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-green-500"/>
+        <button onClick={add} disabled={!newUser.trim()} className="bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white px-4 py-2 rounded-xl font-bold text-sm">Add</button>
+      </div>
+      <details className="mb-3">
+        <summary className="text-xs text-slate-400 cursor-pointer hover:text-white mb-1">📋 Bulk add (comma or newline separated)</summary>
+        <textarea onChange={e=>bulkAdd(e.target.value)} placeholder={"alice\nbob\ncharlie"}
+          className="w-full mt-1 bg-slate-800 border border-slate-600 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none h-20"/>
+      </details>
+      <p className="text-xs text-slate-400 mb-2">{approved.length}/100 usernames:</p>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 max-h-72 overflow-y-auto">
+        {approved.map(u=>(
+          <div key={u} className="flex items-center justify-between bg-slate-800 rounded-lg px-2 py-1.5 border border-slate-700">
+            <span className="text-xs font-medium truncate">{u}</span>
+            <button onClick={()=>remove(u)} className="text-red-500 hover:text-red-400 text-xs ml-1 shrink-0">✕</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AdminGroups({settings,onSave}){
+  const [groups,setGroups]=useState({});
+  useEffect(()=>setGroups(JSON.parse(JSON.stringify(settings?.results?.groups||{}))),[settings]);
+  const set=(gid,pos,val)=>setGroups(p=>({...p,[gid]:{...(p[gid]||{}),[pos]:val}}));
+  return(
+    <div>
+      <p className="text-xs text-slate-400 mb-3">Enter actual 1st and 2nd place after group stage. Points auto-calculate for all players.</p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+        {GROUPS.map(g=>{
+          const gr=groups[g.id]||{};
+          return(
+            <div key={g.id} className="bg-slate-800 rounded-xl p-3 border border-slate-700">
+              <div className="font-black text-green-400 text-sm mb-2">Group {g.id}</div>
+              {[['first','1st Place'],['second','2nd Place']].map(([pos,lbl])=>(
+                <div key={pos} className="mb-1.5">
+                  <label className="text-xs text-slate-400">{lbl}</label>
+                  <select value={gr[pos]||''} onChange={e=>set(g.id,pos,e.target.value)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none mt-0.5">
+                    <option value="">— Select —</option>
+                    {g.teams.filter(t=>t!==(pos==='first'?gr.second:gr.first)).map(t=><option key={t} value={t}>{FL[t]||''} {t}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      <button onClick={()=>onSave({...settings,results:{...settings.results,groups}})}
+        className="w-full bg-green-700 hover:bg-green-600 text-white py-2.5 rounded-xl font-black text-sm">💾 Save Group Results</button>
+    </div>
+  );
+}
+
+function AdminKnockout({settings,onSave}){
+  const [rnd,setRnd]=useState('r32');
+  const [home,setHome]=useState('');const [away,setAway]=useState('');
+  const [edits,setEdits]=useState({});
+  const openRounds=settings.openRounds||[];
+  const matches=settings.results?.[rnd]||[];
+  const cfg=RC[rnd];
+  const allT=['TBD',...ALL_TEAMS];
+
+  const addMatch=()=>{
+    if(!home||!away||home===away) return;
+    const mid=`${rnd}_${Date.now()}`;
+    onSave({...settings,results:{...settings.results,[rnd]:[...matches,{id:mid,home,away,result:null}]}});
+    setHome('');setAway('');
+  };
+  const removeMatch=mid=>onSave({...settings,results:{...settings.results,[rnd]:matches.filter(m=>m.id!==mid)}});
+  const getE=m=>edits[m.id]||(m.result?{winner:m.result.winner,h:m.result.h,a:m.result.a}:{});
+  const setE=(mid,f,v)=>setEdits(p=>({...p,[mid]:{...getE({id:mid,result:matches.find(m=>m.id===mid)?.result}),[f]:v}}));
+  const saveResults=()=>{
+    const upd=matches.map(m=>{const e=edits[m.id];if(!e?.winner)return m;return{...m,result:{winner:e.winner,h:Number(e.h??0),a:Number(e.a??0)}};});
+    onSave({...settings,results:{...settings.results,[rnd]:upd}});setEdits({});
+  };
+  const toggleOpen=()=>onSave({...settings,openRounds:openRounds.includes(rnd)?openRounds.filter(r=>r!==rnd):[...openRounds,rnd]});
+
+  return(
+    <div>
+      <div className="flex gap-1 mb-3 flex-wrap">
+        {RNDS.map(r=><button key={r} onClick={()=>setRnd(r)}
+          className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${rnd===r?'bg-green-700 text-white':'bg-slate-700 text-slate-400 hover:text-white'}`}>
+          {RC[r].name}{openRounds.includes(r)&&' 🔓'}</button>)}
+      </div>
+      <button onClick={toggleOpen}
+        className={`w-full mb-3 py-2 rounded-xl text-xs font-bold ${openRounds.includes(rnd)?'bg-red-800 hover:bg-red-700 text-red-200':'bg-yellow-800 hover:bg-yellow-700 text-yellow-200'}`}>
+        {openRounds.includes(rnd)?`🔒 Close ${cfg.name} for picks`:`🔓 Open ${cfg.name} for player picks`}
+      </button>
+      <div className="bg-slate-800 rounded-xl p-3 border border-slate-700 mb-3">
+        <p className="text-xs text-slate-400 mb-2 font-bold">Add Match</p>
+        <div className="flex gap-1 items-center">
+          <select value={home} onChange={e=>setHome(e.target.value)} className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none min-w-0">
+            <option value="">Home</option>{allT.map(t=><option key={t} value={t}>{FL[t]||''} {t}</option>)}
+          </select>
+          <span className="text-slate-500 text-xs font-bold shrink-0">vs</span>
+          <select value={away} onChange={e=>setAway(e.target.value)} className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none min-w-0">
+            <option value="">Away</option>{allT.map(t=><option key={t} value={t}>{FL[t]||''} {t}</option>)}
+          </select>
+          <button onClick={addMatch} disabled={!home||!away||home===away} className="bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg text-sm font-black shrink-0">+</button>
+        </div>
+      </div>
+      {!matches.length&&<p className="text-slate-500 text-sm text-center py-3">No matches added yet for {cfg.name}.</p>}
+      <div className="space-y-2 mb-2">
+        {matches.map(m=>{
+          const e=getE(m);
+          return(
+            <div key={m.id} className="bg-slate-800 rounded-xl p-3 border border-slate-700">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-sm font-semibold">{FL[m.home]||'❓'} {m.home} <span className="text-slate-400">vs</span> {FL[m.away]||'❓'} {m.away}</span>
+                <button onClick={()=>removeMatch(m.id)} className="text-red-500 hover:text-red-400 text-xs ml-2 shrink-0">✕ Remove</button>
+              </div>
+              <div className="flex gap-1 flex-wrap items-center">
+                <label className="text-xs text-slate-400 shrink-0">Result:</label>
+                <select value={e.winner||''} onChange={ev=>setE(m.id,'winner',ev.target.value)}
+                  className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-2 py-1 text-xs text-white focus:outline-none min-w-[90px]">
+                  <option value="">Winner?</option>
+                  <option value={m.home}>{FL[m.home]||''} {m.home}</option>
+                  <option value={m.away}>{FL[m.away]||''} {m.away}</option>
+                </select>
+                {cfg.hasScore&&<>
+                  <input type="number" min="0" max="20" placeholder="H" value={e.h??''} onChange={ev=>setE(m.id,'h',ev.target.value)} className="w-10 text-center bg-slate-700 border border-slate-600 rounded-lg py-1 text-xs focus:outline-none"/>
+                  <span className="text-slate-500 font-bold">–</span>
+                  <input type="number" min="0" max="20" placeholder="A" value={e.a??''} onChange={ev=>setE(m.id,'a',ev.target.value)} className="w-10 text-center bg-slate-700 border border-slate-600 rounded-lg py-1 text-xs focus:outline-none"/>
+                </>}
+                {m.result?.winner&&!edits[m.id]&&<span className="text-xs text-green-400 font-semibold">✅ {FL[m.result.winner]} {m.result.winner}{cfg.hasScore?` (${m.result.h}–${m.result.a})`:''}</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {Object.keys(edits).length>0&&<button onClick={saveResults} className="w-full bg-green-700 hover:bg-green-600 text-white py-2.5 rounded-xl font-black text-sm">💾 Save Results</button>}
+    </div>
+  );
+}
+
+function AdminPlayers({participants,settings,onData,showFlash}){
+  const ranked=[...participants].map(p=>({...p,sc:calcScore(p,settings)})).sort((a,b)=>b.sc.total-a.sc.total);
+  const togglePayment=async(p)=>{
+    try{const nd=await ghWrite({participants:[{...p,paymentConfirmed:!p.paymentConfirmed}]},'Payment toggle: '+p.username);onData(nd);}
+    catch(e){showFlash('❌ Save failed',false);}
+  };
+  const exportCSV=()=>{
+    const rows=['Username,Points,Groups Done,Champion,Signed By,Signed Date,Payment,Last Updated',
+      ...ranked.map(p=>`${p.username},${p.sc.total},${GROUPS.filter(g=>(p.groupPicks?.[g.id]?.length||0)>=2).length},${p.championPick||''},${p.disclaimer?.fullName||''},${p.disclaimer?.timestamp?new Date(p.disclaimer.timestamp).toLocaleDateString():''},${p.paymentConfirmed?'Paid':'Unpaid'},${new Date(p.updatedAt||0).toLocaleDateString()}`)
+    ].join('\n');
+    const a=document.createElement('a'); a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(rows);
+    a.download='wc2026-participants.csv'; a.click();
+  };
+  return(
+    <div>
+      <div className="flex justify-between items-center mb-3">
+        <h3 className="font-bold">{participants.length}/100 Participants</h3>
+        <button onClick={exportCSV} className="text-xs bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded-lg">⬇️ Export CSV</button>
+      </div>
+      <div className="space-y-1.5">
+        {ranked.map(p=>{
+          const done=GROUPS.filter(g=>(p.groupPicks?.[g.id]?.length||0)>=2).length;
+          return(
+            <div key={p.id} className="bg-slate-800 rounded-xl p-3 border border-slate-700">
+              <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold text-sm">{p.username}</div>
+                  <div className="text-xs text-slate-400">{done}/12 grps · 🏆 {p.championPick?FL[p.championPick]||p.championPick:'?'}</div>
+                  {p.disclaimer?.signed&&<div className="text-xs text-slate-500">Signed: {p.disclaimer.fullName}</div>}
+                </div>
+                <div className="text-center shrink-0">
+                  <div className="text-xl font-black text-green-400">{p.sc.total}</div>
+                  <div className="text-xs text-slate-500">pts</div>
+                </div>
+                <div className="flex flex-col gap-1 text-xs shrink-0">
+                  <span className={`px-1.5 py-0.5 rounded text-center ${p.disclaimer?.signed?'bg-green-900/60 text-green-300':'bg-slate-700 text-slate-500'}`}>{p.disclaimer?.signed?'✅ Signed':'⏳ Unsigned'}</span>
+                  <button onClick={()=>togglePayment(p)} className={`px-1.5 py-0.5 rounded text-center ${p.paymentConfirmed?'bg-blue-900/60 text-blue-300':'bg-red-900/40 text-red-400'}`}>
+                    {p.paymentConfirmed?'💳 Paid':'💳 Unpaid'}</button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AdminConfig({settings,onSave,onRefresh}){
+  const [newPw,setNewPw]=useState('');
+  const [champ,setChamp]=useState(settings.results?.champion||'');
+  useEffect(()=>setChamp(settings.results?.champion||''),[settings]);
+  return(
+    <div className="space-y-3">
+      <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+        <h3 className="font-bold text-sm mb-2">📊 Tournament Status</h3>
+        <div className="text-xs text-slate-400 space-y-1">
+          <p>Open rounds: <span className="text-white">{(settings.openRounds||[]).map(r=>RC[r]?.name).join(', ')||'None'}</span></p>
+          <p>Groups with results: <span className="text-white">{Object.values(settings.results?.groups||{}).filter(g=>g?.first).length}/12</span></p>
+          <p>Champion: <span className="text-white">{settings.results?.champion?`${FL[settings.results.champion]} ${settings.results.champion}`:'Not set'}</span></p>
+          <p>Approved users: <span className="text-white">{(settings.approvedUsernames||[]).length}/100</span></p>
+        </div>
+        <button onClick={onRefresh} className="mt-2 w-full text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 py-1.5 rounded-lg">🔄 Refresh Data</button>
+      </div>
+      <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+        <h3 className="font-bold text-sm mb-2">🏆 Set Tournament Champion</h3>
+        <select value={champ} onChange={e=>setChamp(e.target.value)} className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none mb-2">
+          <option value="">— Set after the Final —</option>
+          {ALL_TEAMS.map(t=><option key={t} value={t}>{FL[t]||''} {t}</option>)}
+        </select>
+        <button onClick={()=>onSave({...settings,results:{...settings.results,champion:champ}})} className="w-full bg-green-700 hover:bg-green-600 text-white py-2 rounded-lg text-sm font-bold">Save Champion</button>
+      </div>
+      <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+        <h3 className="font-bold text-sm mb-2">🔑 Change Admin Password</h3>
+        <input type="password" value={newPw} onChange={e=>setNewPw(e.target.value)} placeholder="New password"
+          className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none mb-2"/>
+        <button onClick={()=>{if(newPw){onSave({...settings,adminPw:newPw});setNewPw('');}}} disabled={!newPw}
+          className="w-full bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-white py-2 rounded-lg text-sm font-bold">Update Password</button>
+      </div>
+    </div>
+  );
+}
+
+// MOUNT
+const root=ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+<style>.hide-scrollbar::-webkit-scrollbar{display:none;}.hide-scrollbar{-ms-overflow-style:none;scrollbar-width:none;}</style>
 </body>
 </html>

@@ -1,1 +1,66 @@
-{"settings":{"adminPw":"wc2026admin","approvedUsernames":[],"openRounds":[],"results":{"groups":{},"r32":[],"r16":[],"qf":[],"sf":[],"final":[],"champion":""}},"participants":[]}
+{
+  "settings": {
+    "adminPw": "wc2026admin",
+    "approvedUsernames": [],
+    "openRounds": [],
+    "results": {
+      "groups": {
+        "A": {
+          "first": "Mexico",
+          "second": "South Korea"
+        },
+        "B": {
+          "first": "Switzerland",
+          "second": "Qatar"
+        },
+        "C": {
+          "first": "Haiti",
+          "second": "Scotland"
+        },
+        "D": {
+          "first": "Australia",
+          "second": "USA"
+        },
+        "E": {
+          "first": "Curaçao",
+          "second": "Ecuador"
+        },
+        "F": {
+          "first": "Sweden",
+          "second": "Tunisia"
+        },
+        "G": {
+          "first": "New Zealand",
+          "second": "Egypt"
+        },
+        "H": {
+          "first": "Cape Verde",
+          "second": "Saudi Arabia"
+        },
+        "I": {
+          "first": "Iraq",
+          "second": "Norway"
+        },
+        "J": {
+          "first": "Austria",
+          "second": "Algeria"
+        },
+        "K": {
+          "first": "Uzbekistan",
+          "second": "DR Congo"
+        },
+        "L": {
+          "first": "England",
+          "second": "Ghana"
+        }
+      },
+      "r32": [],
+      "r16": [],
+      "qf": [],
+      "sf": [],
+      "final": [],
+      "champion": ""
+    }
+  },
+  "participants": []
+}

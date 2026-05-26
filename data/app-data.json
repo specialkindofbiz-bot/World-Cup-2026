@@ -1,9 +1,7 @@
 {
   "settings": {
     "adminPw": "wc2026admin",
-    "approvedUsernames": [
-      "joel"
-    ],
+    "approvedUsernames": [],
     "openRounds": [],
     "results": {
       "groups": {
